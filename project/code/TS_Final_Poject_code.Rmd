@@ -1,0 +1,627 @@
+---
+title: "TS_Final_Project_code"
+author: "Bhuvana A K, Yeung Siu Wai Anthony "
+date: "April 11, 2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r snippet to read the file & setup data}
+library(tswge)
+library(tseries)
+library(vars)
+library(nnfor)
+
+library(tidyverse)
+library(GGally)
+
+getwd()
+setwd("../data/dataverse_files/residential/")
+
+temp = list.files(pattern="Residential*.csv")
+len = length(temp)
+#desired data range for the problem
+start <-as.Date("2015-04-01",format="%Y-%m-%d")
+end <-as.Date("2017-12-31",format="%Y-%m-%d")
+
+for(i in seq(1,len)){
+  csv = read.csv(file = temp[i])
+  last = nrow(csv)
+  startDate = as.Date(csv[1]$date[1],format="%Y-%m-%d")
+  l =csv[1]$date[last]
+  endDate = as.Date(l,format="%Y-%m-%d")
+  if(startDate  > start){
+   paste(temp[i]," start date is",format(startDate, format="%B %d %Y")," which is after ",format(start, format="%B %d %Y"),". Hence Excluding this file.")
+  }
+  else if(endDate < end){
+    paste(temp[i]," end date is",format(endDate, format="%B %d %Y")," which is before",format(end, format="%B %d %Y"),". Hence Excluding this file.")
+  }
+  
+  else {
+  #read the csv file & create the df
+  agg = aggregate(x=csv$energy_kWh,by = list(csv$date),FUN = sum)
+  bc_energy_all <- data.frame(agg[1], agg[2])
+  names(bc_energy_all) <- c("date","totalEnergy")
+  bc_energy_all$houseNo <- rep(i,nrow(bc_energy_all))
+  bc_energy_all$date <- as.character(bc_energy_all$date)
+  dfTemp <- setDT(bc_energy_all)[date %between% c('2015-04-01', '2017-12-31')]
+  bc_energy <- bind_rows(bc_energy,dfTemp)
+  }
+  #print(head(csv))
+}
+nrow(bc_energy)
+bc_energy <- bc_energy[!is.na(bc_energy$totalEnergy), ]
+agg = aggregate(x=bc_energy$totalEnergy,by = list(bc_energy$date),FUN = sum)
+total_bc_energy <- data.frame(agg[1], agg[2])
+names(total_bc_energy) <- c("date","totalEnergy")
+bc_energy= data.frame()
+
+#get the weather data 
+getwd()
+setwd("../data/")
+wFile = "WeatherData-2015-2017.csv"
+w = read.csv(file = wFile)
+w$date <- as.Date(w$date,format="%m/%d/%Y")
+
+#Merge weather data with energy consumption
+total_bc_energy$date <- as.Date(total_bc_energy$date,format="%Y-%m-%d")
+bc_energy_wh<-merge(total_bc_energy, w, by="date")
+#write.csv(bc_energy_wh,"total_bc_energy_weather.csv") - 
+
+```
+
+## Starting the analysis
+
+
+```{r univariate analysis, echo=FALSE}
+#Stationarity
+plotts.sample.wge(bc_energy_wh$totalEnergy)
+nrow(bc_energy_wh)
+parzen.wge(bc_energy_wh$totalEnergy,trunc = 70)
+plotts.wge(bc_energy_wh$totalEnergy)
+acf(bc_energy_wh$totalEnergy)
+acf(bc_energy_wh$totalEnergy[1:503])
+acf(bc_energy_wh$totalEnergy[504:1006])
+
+e=bc_energy_wh$totalEnergy
+#ARMA
+aic5.wge(e,p=0:10,q=0:4,type='aic')
+aic5.wge(e,p=0:10,q=0:3,type='bic')
+
+m1=est.arma.wge(e,p=10,q=2)
+f1=fore.arma.wge(e,phi=m1$phi,n.ahead = 180,lastn=T,plot=T)
+f1$f
+m1$phi
+m1$avar
+
+plotts.sample.wge(m1$res)
+mean(e)
+factor.wge(phi = m1$phi)
+
+factor.wge(phi = m1$theta)
+
+ase_f1 = mean((e[(length(e)-179):length(e)] - f1$f)^2)
+ase_f1
+
+ljung.wge(m1$res)#pval 0.725
+ljung.wge(m1$res, K = 48)#0.02
+
+#ARUMA
+e_s7 = artrans.wge(e,phi.tr = c(rep(0,6),1))
+aic5.wge(e_s7,p=0:12,q=0:3)
+aic5.wge(e_s7,p=0:10,q=0:5,type = "bic")
+
+aruma1a = est.arma.wge(e_s7,p =12,q=2)
+af1=fore.arma.wge(e,phi=aruma1a$phi,n.ahead = 180,lastn=T,plot=T)
+af1$f
+aruma1a$phi
+aruma1a$avar
+
+plotts.sample.wge(aruma1a$res)
+factor.wge(phi = aruma1a$phi)
+
+factor.wge(phi = aruma1a$theta)
+
+ase_af1 = mean((e[(length(e)-179):length(e)] - af1$f)^2)
+ase_af1
+
+ljung.wge(aruma1a$res)#pval 0.07
+ljung.wge(aruma1a$res, K = 48)#pval 0.002
+
+```
+
+## Starting the Multi Variate analysis
+
+
+```{r multivariate analysis, echo=FALSE}
+
+ggpairs(bc_energy_wh[2:5])
+
+#step 1 assign the data
+e1<-bc_energy_wh
+#step 2 check the data
+head(e1,3)
+#step 3 check length of the data
+nrow(e1)#1006
+
+##############################VARselect###################################
+#step 4
+e1s = e1[1:826,]
+VARselect(cbind(e1s$totalEnergy[1:826],e1s$temperature[1:826], 
+                 e1s$humidity[1:826], 
+                 e1s$pressure[1:826]),
+                 lag.max=10,season=7, type = "both")
+ 
+# VARselect select p=4 aic 12.05
+
+ #step 5
+ #VAR
+ e_VAR = VAR(cbind(e1s$totalEnergy[1:826],e1s$temperature[1:826], 
+                   e1s$humidity[1:826], 
+                   e1s$pressure[1:826]), type = "both", p=4,season=7)
+ 
+#step 6
+# prediction
+ 
+preds =predict(e_VAR,n.ahead=180)
+
+preds
+
+# check length of forecast 
+
+length(preds$fcst$y1[,1]) # 180 
+
+#step 7
+#Plot
+
+plot(seq(1,1006,1), e1$totalEnergy, type = "l",xlim = c(0,1008), ylab = "Energy Consumed", 
+     main = "180 day Total Energy Comsumption Forecast")
+
+lines(seq(827,1006,1), preds$fcst$y1[,1], type = "l", col = "red")
+#fanchart(preds$fcst$y4[,1])
+
+
+
+#step 8
+
+length(e1$totalEnergy[827:1006]) #108
+
+length(preds$fcst$y1[ , 1]) #108
+
+ASE = mean((e1$totalEnergy[827:1006] - preds$fcst$y1[,1])^2)
+
+# step 9 ASE
+ASE
+
+#[1] 22378.95
+# VAR Model ASE = 22378.95
+
+# *********** End VAR Model **************#
+
+```
+
+##Regression
+```{r multivariate analysis - Regression , echo=FALSE}
+# *********** MLR Model **************#
+
+ksfit = lm(e1s$totalEnergy[1:826] ~ 
+          e1s$temperature[1:826]+
+           e1s$humidity[1:826]+
+           e1s$pressure[1:826],
+           data=e1s )
+
+ksfit
+summary(ksfit)
+####
+# step 4
+# aic data set is Multiple regression residual
+aic.wge(ksfit$residuals, p=0:8, q=0:0) #p=5 q=0
+#step 5
+#run arima  *with xreg*
+fit = arima(e1s$totalEnergy[1:826], 
+            order=c(8,0,0),
+            xreg= cbind
+            (e1s$temperature[1:826], 
+              e1s$humidity[1:826], 
+              e1s$pressure[1:826]))
+
+fit
+ljung.wge(fit$residuals)
+plotts.sample.wge(fit$residuals)
+preds_r = predict(fit, newxreg = cbind(e1$temperature[827:1006], 
+                                       e1$humidity[827:1006], 
+                                       e1$pressure[827:1006]))
+ASE_MLR= mean((e1$totalEnergy[827:1006] - preds_r$pred)^2)
+ASE_MLR #[1] 15854.47
+plot(e1$totalEnergy[1:1006], type = "l",xlim = c(0,1006), ylab = "Energy Consumption", main = "180 days Total Energy Consumption Forecast")
+lines(seq(827,1006,1), preds_r$pred, type = "l", col = "red")
+
+
+#************END MLR *****#
+```
+
+##MLP model - NN
+
+```{r multivariate analysis MLP, echo=FALSE }
+
+#************Model  Multivariate MLP *****#
+
+##### Multivariate MLP MODEL FOR Total 
+
+#Step 1 subset training data set
+
+e_sub =ts(e1$totalEnergy[1:826])
+
+length(e_sub)#826
+
+tem_sub =ts(e1$temperature[1:826])
+length(tem_sub) #826
+
+hum_sub = ts(e1$humidity[1:826])
+length(hum_sub) #826
+
+pre_sub=ts(e1$pressure[1:826])
+length(pre_sub)#826
+
+e_tot = ts(e1$totalEnergy)
+length(e_tot) #1006
+
+#step 2 check the data
+
+head(e_sub, 3)
+
+#step 3 Data frame
+
+tem =ts(e1$temperature)
+length(tem) #1006
+
+hum = ts(e1$humidity)
+length(hum) #1006
+
+pre=ts(e1$pressure)
+length(pre)#1006
+
+e_tot = ts(e1$totalEnergy)
+length(e_tot) #1006
+
+# data frame e_DF
+
+e_DF = data.frame(tem ,hum , pre)
+
+e_sub_DF = data.frame(tem_sub ,hum_sub , pre_sub)
+
+#step 4
+
+head(e_DF,3) #check data frame data
+head(e_sub)
+#step 5
+# multivariate MLP model 1
+
+e_mlp = mlp(e_sub, xreg = e_sub_DF)
+e_mlp_1 =e_mlp
+#
+#MLP fit with 5 hidden nodes and 20 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the median operator.
+#MSE: 9613.4032.
+# MSE: 9490.7935.
+
+# multivariate MLP model 1a
+
+e_mlp = mlp(e_sub, xreg = e_sub_DF,comb="mean")
+e_mlp_1mean =e_mlp
+nrow(e_DF)#1006
+#MLP fit with 5 hidden nodes and 20 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the mean operator.
+#MSE: 9212.8215.
+# mlp hd.auto.type="elm: model 2
+
+# multivariate MLP model 2
+e_mlp = mlp(e_sub, xreg = e_sub_DF,comb="mean",
+            hd.auto.type="elm")
+e_mlp_2=e_mlp
+#MLP fit with 6 hidden nodes and 20 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the mean operator.
+#MSE: 8454.93.
+
+# multivariate MLP model 2a - Takes much longer time due to CV
+e_mlp_2a = mlp(e_sub, xreg = e_sub_DF,
+            hd.auto.type="cv")
+
+# multivariate MLP model 3
+
+#MLP model 3
+e_mlp = mlp(e_sub, xreg = e_sub_DF,
+            reps=10, comb="mean")
+e_mlp_3=e_mlp
+#MLP fit with 5 hidden nodes and 10 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the mean operator.
+#MSE: 9185.6211.
+
+## multivariate MLP model 3a
+#MLP model 3a
+e_mlp = mlp(e_sub, xreg = e_sub_DF,
+            reps=20, comb="mean")
+e_mlp_3a=e_mlp
+
+# multivariate MLP model 4
+#MLP model 4
+e_mlp_50 = mlp(e_sub, xreg = e_sub_DF,
+            reps=50, comb="mean")
+
+
+#MLP fit with 5 hidden nodes and 50 repetitions.
+#MLP fit with 5 hidden nodes and 50 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the mean operator.
+#MSE: 9099.664.
+
+# multivariate MLP model 5
+#MLP model 5
+
+e_mlp_100 = mlp(e_sub, xreg = e_sub_DF,
+            reps=100, comb="mean")
+#MLP fit with 5 hidden nodes and 100 repetitions.
+#Univariate lags: (1,2,4)
+#3 regressors included.
+#- Regressor 1 lags: (1,2)
+#- Regressor 2 lags: (2)
+#- Regressor 3 lags: (1,3)
+#Forecast combined using the mean operator.
+#MSE: 9122.6084.
+
+
+# step 6
+e_mlp_2 #desired model
+
+
+#step 7
+plot(e_mlp_1)
+plot(e_mlp_1mean)
+plot(e_mlp_2)
+plot(e_mlp_3)
+plot(e_mlp_50)
+plot(e_mlp_100)
+
+#step 8
+# forecast data set is e_mlp
+# xreg is the multiple regression
+#length of xreg mst be longer than forecast variable
+
+e_f1 = forecast(e_mlp_1, h = 180,xreg = e_DF)
+#e_f11 = forecast(e_mlp_1, h = 180)
+
+e_f1mn = forecast(e_mlp_1mean, h = 180,xreg = e_DF)
+e_f2 = forecast(e_mlp_2, h = 180,xreg = e_DF)
+e_f3 = forecast(e_mlp_3, h = 180,xreg = e_DF)
+e_f3a = forecast(e_mlp_3a, h = 180,xreg = e_DF)
+
+e_f4 = forecast(e_mlp_50, h = 180,xreg = e_DF)
+e_f5 = forecast(e_mlp_100, h = 180,xreg = e_DF)
+
+#step 9
+# AY note, this plot has forecast
+
+plot(e_f1)
+plot(e_f1mn)
+plot(e_f2)
+plot(e_f3)
+plot(e_f3a)
+plot(e_f4)
+plot(e_f5)
+
+
+#step 10
+length(e1$totalEnergy[827:1006])#180
+
+length(e_f1$mean) #180
+
+#step 11
+ASEf1 = mean((e1$totalEnergy[827:1006] - e_f1$mean)^2)
+ASEf1m = mean((e1$totalEnergy[827:1006] - e_f1mn$mean)^2)
+
+ASEf2 = mean((e1$totalEnergy[827:1006] - e_f2$mean)^2)
+ASEf3 = mean((e1$totalEnergy[827:1006] - e_f3$mean)^2)
+ASEf3a = mean((e1$totalEnergy[827:1006] - e_f3a$mean)^2)
+ASEf4 = mean((e1$totalEnergy[827:1006] - e_f4$mean)^2)
+ASEf5 = mean((e1$totalEnergy[827:1006] - e_f5$mean)^2)
+
+#step 12
+ASEf1
+ASEf1m
+
+ASEf2
+ASEf3
+ASEf3a
+ASEf4
+ASEf5
+#> ASEf1
+#[1] 14526.16
+#> ASEf1m
+#[1] 14784.85
+#> ASEf2
+#[1] 38398.43
+#> ASEf3
+#[1] 14199.65
+#> ASEf3a
+#[1] 14798.91
+#> ASEf4
+#[1] 14332.78
+#> ASEf5
+#[1] 14232.72
+#******** end multivariate MLP Model ****************#
+
+```
+
+##Charts
+```{r charts for the model, echo=FALSE}
+
+library(RColorBrewer)
+
+plot(e1$totalEnergy[1:1006], type = "l",xlim = c(0,1006), ylab = "Energy Consumption", main = "180 days Total Energy Consumption Forecast")
+e_fs = data.frame(e_f$mean,e_f1mn$mean,e_f2$mean,e_f3$mean,e_f4$mean,e_f5$mean)
+colors <- brewer.pal(n = 8, name = "Set1")
+lines(seq(827,1006,1), e_fs[,1], type = "l", col = colors[1],lwd=2.5)
+lines(seq(827,1006,1), e_fs[,2], type = "l", col = colors[2],lwd=2.5)
+lines(seq(827,1006,1), e_fs[,3], type = "l", col = colors[3],lwd=2.5)
+lines(seq(827,1006,1), e_fs[,4], type = "l", col = colors[4],lwd=2.5)
+lines(seq(827,1006,1), e_fs[,5], type = "l", col = colors[5],lwd=2.5)
+lines(seq(827,1006,1), e_fs[,6], type = "l", col = colors[7],lwd=2.5)
+
+```
+
+##ENSEMBLE
+
+```{r ensemble models , echo=FALSE}
+
+#********** ensemble ***********************#
+
+#Ensemble 
+#step 1
+ensemble1  = (preds$fcst$y4[,1] + e_f3$mean ) /2
+
+ensemble2 =(preds_r$pred+e_f3$mean)/2      
+length(e)
+
+#Plot
+#step 2
+plot(seq(1,1006,1), e, type = "l",xlim = c(0,1006), ylab = "Energy Consumption", main = "180 days Total Energy Consumption Forecast")
+
+#step 3
+lines(seq(827,1006,1), ensemble1, type = "l", col = "red",lwd=2.5)
+
+lines(seq(827,1006,1), ensemble2, type = "l", col = "blue",lwd=2.5)
+
+#step 4
+length (e[827  :1006 ])#180
+
+length ( ensemble1  ) #180
+
+ens1_ASE = mean((e[827  :1006] - ensemble1)^2)
+ens2_ASE = mean((e[827  :1006] - ensemble2)^2)
+
+#step 5
+ens1_ASE
+#[1] 15547.51
+ens2_ASE
+#[1] 14282.24
+#14033.27
+#******* end ensemble **********
+
+
+```
+
+##FORECASTING
+
+```{r Forecast for next 180 days, echo=FALSE}
+
+getwd()
+testWFile = 'WeatherData-2018JanToJunV2.csv'
+tw = read.csv(file = testWFile)
+tw <- tw[!is.na(tw$temperature), ]
+
+head(tw)
+tail(tw)
+nrow(tw)#181
+
+##MR 
+tTemp = c(e1s$temperature[1:1006],tw$temperature)#testTemp Apr 2015 to Dec 2017 + Jan to Jun 2018
+tHum=c(e1s$humidity[1:1006],tw$humidity)
+tPre=c(e1s$pressure[1:1006],tw$pressure)
+ksfitf = lm(e1s$totalEnergy[1:1006] ~ 
+              e1s$temperature[1:1006]+e1s$humidity[1:1006]
+              +e1s$pressure[1:1006],data=e1s )
+
+ksfitf
+aic.wge(ksfitf$residuals, p=0:8, q=0:0) #p=8 q=0
+ffit = arima(e1s$totalEnergy[1:1006], 
+             order=c(8,0,0),
+             xreg= cbind
+             (e1s$temperature[1:1006], 
+               e1s$humidity[1:1006], 
+               e1s$pressure[1:1006]))
+
+ffit#aic 10041.08
+preds_rf = predict(ffit, newxreg = cbind(tTemp,tHum,tPre))#1186 predictions
+
+length(preds_rf)
+
+##END MR
+
+##NN/MLP
+tem1 =ts(tw$temperature)
+t_tem = ts(c(tem, tem1),               # Combined time series object
+   start = start(tem),
+   frequency = frequency(tem))
+length(t_tem) #1006+180
+
+hum1 = ts(tw$humidity)
+t_hum = ts(c(hum, hum1),               # Combined time series object
+           start = start(hum),
+           frequency = frequency(hum))
+
+length(t_hum) #1006+180
+
+pre1=ts(tw$pressure)
+t_pre = ts(c(pre,pre1),               # Combined time series object
+           start = start(pre),
+           frequency = frequency(pre))
+
+length(t_pre)#1006+180
+
+#MLP
+e_mlp_f = mlp(e_tot,xreg = e_DF,reps=10, comb="mean")# final model
+plot(e_mlp_f)
+e_tst_DF = data.frame(t_tem,t_hum,t_pre)#test df including 2018 data.
+length(e_tst_DF)
+nrow(e_tst_DF)#1187
+tail(e_tst_DF)
+
+e_ff = forecast(e_mlp_f,h=180,xreg=e_tst_DF)#1186 forecasts
+#End MLP
+
+#ensemble
+ensemble2f =(preds_rf$pred+e_ff$mean)/2      
+
+#write data to compare 2018 Jan data against 2018 Jan actuals
+write.csv(ensemble2f,"C:/SMU_MAIN/SMU_TERM5/TS/Data/dataverse_files/forecast180_v2.csv")
+
+
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
